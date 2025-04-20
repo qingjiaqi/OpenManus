@@ -1,40 +1,49 @@
+# 导入必要的类型和模块
 from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
 
+# 表示单个搜索结果的模型类
 class SearchItem(BaseModel):
-    """Represents a single search result item"""
+    """表示单个搜索结果项"""
 
-    title: str = Field(description="The title of the search result")
-    url: str = Field(description="The URL of the search result")
+    # 搜索结果的标题
+    title: str = Field(description="搜索结果的标题")
+    # 搜索结果的URL
+    url: str = Field(description="搜索结果的URL")
+    # 搜索结果的描述（可选）
     description: Optional[str] = Field(
-        default=None, description="A description or snippet of the search result"
+        default=None, description="搜索结果的描述或摘要"
     )
 
+    # 返回搜索结果的字符串表示形式
     def __str__(self) -> str:
-        """String representation of a search result item."""
+        """返回搜索结果的字符串表示形式"""
         return f"{self.title} - {self.url}"
 
 
+# 搜索引擎的抽象基类
 class WebSearchEngine(BaseModel):
-    """Base class for web search engines."""
+    """搜索引擎的基类，定义了搜索接口"""
 
+    # 允许任意类型配置
     model_config = {"arbitrary_types_allowed": True}
 
+    # 执行搜索并返回搜索结果列表
     def perform_search(
         self, query: str, num_results: int = 10, *args, **kwargs
     ) -> List[SearchItem]:
         """
-        Perform a web search and return a list of search items.
+        执行搜索并返回搜索结果列表
 
-        Args:
-            query (str): The search query to submit to the search engine.
-            num_results (int, optional): The number of search results to return. Default is 10.
-            args: Additional arguments.
-            kwargs: Additional keyword arguments.
+        参数:
+            query (str): 搜索关键词
+            num_results (int, optional): 返回的搜索结果数量，默认为10
+            args: 额外参数
+            kwargs: 额外关键字参数
 
-        Returns:
-            List[SearchItem]: A list of SearchItem objects matching the search query.
+        返回:
+            List[SearchItem]: 匹配搜索关键词的搜索结果列表
         """
         raise NotImplementedError

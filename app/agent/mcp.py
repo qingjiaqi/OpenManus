@@ -1,13 +1,13 @@
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple  # 导入类型注解模块，用于类型提示
 
-from pydantic import Field
+from pydantic import Field  # 导入Pydantic的Field，用于定义模型字段
 
-from app.agent.toolcall import ToolCallAgent
-from app.logger import logger
-from app.prompt.mcp import MULTIMEDIA_RESPONSE_PROMPT, NEXT_STEP_PROMPT, SYSTEM_PROMPT
-from app.schema import AgentState, Message
-from app.tool.base import ToolResult
-from app.tool.mcp import MCPClients
+from app.agent.toolcall import ToolCallAgent  # 导入基础工具调用Agent类
+from app.logger import logger  # 导入日志模块
+from app.prompt.mcp import MULTIMEDIA_RESPONSE_PROMPT, NEXT_STEP_PROMPT, SYSTEM_PROMPT  # 导入MCP相关的提示模板
+from app.schema import AgentState, Message  # 导入Agent状态和消息模型
+from app.tool.base import ToolResult  # 导入工具结果基类
+from app.tool.mcp import MCPClients  # 导入MCP客户端工具
 
 
 class MCPAgent(ToolCallAgent):
@@ -17,24 +17,24 @@ class MCPAgent(ToolCallAgent):
     and makes the server's tools available through the agent's tool interface.
     """
 
-    name: str = "mcp_agent"
-    description: str = "An agent that connects to an MCP server and uses its tools."
+    name: str = "mcp_agent"  # Agent名称
+    description: str = "An agent that connects to an MCP server and uses its tools."  # Agent描述
 
-    system_prompt: str = SYSTEM_PROMPT
-    next_step_prompt: str = NEXT_STEP_PROMPT
+    system_prompt: str = SYSTEM_PROMPT  # 系统提示模板
+    next_step_prompt: str = NEXT_STEP_PROMPT  # 下一步提示模板
 
-    # Initialize MCP tool collection
+    # 初始化MCP工具集合
     mcp_clients: MCPClients = Field(default_factory=MCPClients)
-    available_tools: MCPClients = None  # Will be set in initialize()
+    available_tools: MCPClients = None  # 可用工具集合，将在initialize()中设置
 
-    max_steps: int = 20
-    connection_type: str = "stdio"  # "stdio" or "sse"
+    max_steps: int = 20  # 最大执行步数
+    connection_type: str = "stdio"  # 连接类型："stdio"或"sse"
 
-    # Track tool schemas to detect changes
+    # 跟踪工具模式以检测变更
     tool_schemas: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
-    _refresh_tools_interval: int = 5  # Refresh tools every N steps
+    _refresh_tools_interval: int = 5  # 每N步刷新一次工具列表
 
-    # Special tool names that should trigger termination
+    # 特殊工具名称，触发终止操作
     special_tool_names: List[str] = Field(default_factory=lambda: ["terminate"])
 
     async def initialize(
@@ -44,40 +44,40 @@ class MCPAgent(ToolCallAgent):
         command: Optional[str] = None,
         args: Optional[List[str]] = None,
     ) -> None:
-        """Initialize the MCP connection.
+        """初始化MCP连接。
 
-        Args:
-            connection_type: Type of connection to use ("stdio" or "sse")
-            server_url: URL of the MCP server (for SSE connection)
-            command: Command to run (for stdio connection)
-            args: Arguments for the command (for stdio connection)
+        参数:
+            connection_type: 连接类型（"stdio"或"sse"）
+            server_url: MCP服务器的URL（用于SSE连接）
+            command: 运行的命令（用于stdio连接）
+            args: 命令的参数（用于stdio连接）
         """
         if connection_type:
-            self.connection_type = connection_type
+            self.connection_type = connection_type  # 更新连接类型
 
-        # Connect to the MCP server based on connection type
+        # 根据连接类型连接到MCP服务器
         if self.connection_type == "sse":
             if not server_url:
                 raise ValueError("Server URL is required for SSE connection")
-            await self.mcp_clients.connect_sse(server_url=server_url)
+            await self.mcp_clients.connect_sse(server_url=server_url)  # 建立SSE连接
         elif self.connection_type == "stdio":
             if not command:
                 raise ValueError("Command is required for stdio connection")
-            await self.mcp_clients.connect_stdio(command=command, args=args or [])
+            await self.mcp_clients.connect_stdio(command=command, args=args or [])  # 建立stdio连接
         else:
             raise ValueError(f"Unsupported connection type: {self.connection_type}")
 
-        # Set available_tools to our MCP instance
+        # 设置可用工具为MCP实例
         self.available_tools = self.mcp_clients
 
-        # Store initial tool schemas
+        # 存储初始工具模式
         await self._refresh_tools()
 
-        # Add system message about available tools
+        # 添加关于可用工具的系统消息
         tool_names = list(self.mcp_clients.tool_map.keys())
         tools_info = ", ".join(tool_names)
 
-        # Add system prompt and available tools information
+        # 添加系统提示和可用工具信息
         self.memory.add_message(
             Message.system_message(
                 f"{self.system_prompt}\n\nAvailable MCP tools: {tools_info}"
@@ -85,35 +85,35 @@ class MCPAgent(ToolCallAgent):
         )
 
     async def _refresh_tools(self) -> Tuple[List[str], List[str]]:
-        """Refresh the list of available tools from the MCP server.
+        """从MCP服务器刷新可用工具列表。
 
-        Returns:
-            A tuple of (added_tools, removed_tools)
+        返回:
+            一个元组，包含（新增工具列表，移除工具列表）
         """
         if not self.mcp_clients.session:
-            return [], []
+            return [], []  # 无会话时返回空列表
 
-        # Get current tool schemas directly from the server
+        # 直接从服务器获取当前工具模式
         response = await self.mcp_clients.session.list_tools()
         current_tools = {tool.name: tool.inputSchema for tool in response.tools}
 
-        # Determine added, removed, and changed tools
+        # 确定新增、移除和变更的工具
         current_names = set(current_tools.keys())
         previous_names = set(self.tool_schemas.keys())
 
-        added_tools = list(current_names - previous_names)
-        removed_tools = list(previous_names - current_names)
+        added_tools = list(current_names - previous_names)  # 新增工具
+        removed_tools = list(previous_names - current_names)  # 移除工具
 
-        # Check for schema changes in existing tools
+        # 检查现有工具的变更
         changed_tools = []
         for name in current_names.intersection(previous_names):
             if current_tools[name] != self.tool_schemas.get(name):
-                changed_tools.append(name)
+                changed_tools.append(name)  # 记录变更的工具
 
-        # Update stored schemas
+        # 更新存储的模式
         self.tool_schemas = current_tools
 
-        # Log and notify about changes
+        # 记录并通知变更
         if added_tools:
             logger.info(f"Added MCP tools: {added_tools}")
             self.memory.add_message(
@@ -132,31 +132,35 @@ class MCPAgent(ToolCallAgent):
         return added_tools, removed_tools
 
     async def think(self) -> bool:
-        """Process current state and decide next action."""
-        # Check MCP session and tools availability
+        """处理当前状态并决定下一步操作。
+
+        返回:
+            布尔值，表示是否继续执行
+        """
+        # 检查MCP会话和工具可用性
         if not self.mcp_clients.session or not self.mcp_clients.tool_map:
             logger.info("MCP service is no longer available, ending interaction")
             self.state = AgentState.FINISHED
             return False
 
-        # Refresh tools periodically
+        # 定期刷新工具
         if self.current_step % self._refresh_tools_interval == 0:
             await self._refresh_tools()
-            # All tools removed indicates shutdown
+            # 所有工具被移除表示服务器关闭
             if not self.mcp_clients.tool_map:
                 logger.info("MCP service has shut down, ending interaction")
                 self.state = AgentState.FINISHED
                 return False
 
-        # Use the parent class's think method
+        # 使用父类的think方法
         return await super().think()
 
     async def _handle_special_tool(self, name: str, result: Any, **kwargs) -> None:
-        """Handle special tool execution and state changes"""
-        # First process with parent handler
+        """处理特殊工具执行和状态变更。"""
+        # 先调用父类处理逻辑
         await super()._handle_special_tool(name, result, **kwargs)
 
-        # Handle multimedia responses
+        # 处理多媒体响应
         if isinstance(result, ToolResult) and result.base64_image:
             self.memory.add_message(
                 Message.system_message(
@@ -165,21 +169,21 @@ class MCPAgent(ToolCallAgent):
             )
 
     def _should_finish_execution(self, name: str, **kwargs) -> bool:
-        """Determine if tool execution should finish the agent"""
-        # Terminate if the tool name is 'terminate'
+        """判断工具执行是否应终止Agent。"""
+        # 如果工具名称为"terminate"，则终止
         return name.lower() == "terminate"
 
     async def cleanup(self) -> None:
-        """Clean up MCP connection when done."""
+        """清理MCP连接。"""
         if self.mcp_clients.session:
             await self.mcp_clients.disconnect()
             logger.info("MCP connection closed")
 
     async def run(self, request: Optional[str] = None) -> str:
-        """Run the agent with cleanup when done."""
+        """运行Agent并在完成后清理。"""
         try:
             result = await super().run(request)
             return result
         finally:
-            # Ensure cleanup happens even if there's an error
+            # 确保即使出错也执行清理
             await self.cleanup()

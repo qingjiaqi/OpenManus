@@ -1,20 +1,21 @@
-import asyncio
-import json
-import re
-import time
-from typing import List, Optional, Set
+# 导入必要的库和模块
+import asyncio  # 异步IO支持
+import json  # JSON数据处理
+import re  # 正则表达式支持
+import time  # 时间处理
+from typing import List, Optional, Set  # 类型注解支持
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator  # 数据模型和验证
 
-from app.exceptions import ToolError
-from app.llm import LLM
-from app.logger import logger
-from app.schema import ToolChoice
-from app.tool.base import BaseTool, ToolResult
-from app.tool.web_search import SearchResult, WebSearch
+from app.exceptions import ToolError  # 自定义异常
+from app.llm import LLM  # 大语言模型接口
+from app.logger import logger  # 日志记录
+from app.schema import ToolChoice  # 工具选择模型
+from app.tool.base import BaseTool, ToolResult  # 基础工具类
+from app.tool.web_search import SearchResult, WebSearch  # 网络搜索工具
 
 
-# Prompts for LLM interactions
+# 用于与大语言模型交互的提示模板
 OPTIMIZE_QUERY_PROMPT = """
 You are a research assistant helping to optimize a search query for web research.
 Your task is to reformulate the given query to be more effective for web searches.
@@ -51,75 +52,111 @@ Generate up to 3 specific follow-up queries that would help address gaps in our 
 Each query should be concise and focused on a specific aspect of the research topic.
 """
 
-# Constants for insight parsing
-DEFAULT_RELEVANCE_SCORE = 1.0
-FALLBACK_RELEVANCE_SCORE = 0.7
-FALLBACK_CONTENT_LIMIT = 500
-# Pattern to detect start of an insight (number., -, *, •) and capture content
+# 用于解析洞察结果的常量
+DEFAULT_RELEVANCE_SCORE = 1.0  # 默认相关性分数
+FALLBACK_RELEVANCE_SCORE = 0.7  # 回退相关性分数
+FALLBACK_CONTENT_LIMIT = 500  # 回退内容长度限制
+# 匹配洞察内容的正则表达式（数字、-、*、•开头）
 INSIGHT_MARKER_PATTERN = re.compile(r"^\s*(?:\d+\.|-|\*|•)\s*(.*)")
-# Pattern to detect relevance score, capturing the number (case-insensitive)
+# 匹配相关性分数的正则表达式（不区分大小写）
 RELEVANCE_SCORE_PATTERN = re.compile(r"relevance.*?:.*?(\d\.?\d*)", re.IGNORECASE)
 
 
 class ResearchInsight(BaseModel):
-    """A single insight discovered during research."""
+    """
+    表示在研究过程中发现的单个洞察结果。
 
-    model_config = ConfigDict(frozen=True)  # Make insights immutable
+    属性:
+        content (str): 洞察内容。
+        source_url (str): 发现该洞察的URL。
+        source_title (Optional[str]): 来源标题（可选）。
+        relevance_score (float): 相关性评分（0.0-1.0）。
+    """
 
-    content: str = Field(description="The insight content")
-    source_url: str = Field(description="URL where this insight was found")
-    source_title: Optional[str] = Field(default=None, description="Title of the source")
+    model_config = ConfigDict(frozen=True)  # 使洞察结果不可变
+
+    content: str = Field(description="洞察内容")
+    source_url: str = Field(description="发现该洞察的URL")
+    source_title: Optional[str] = Field(default=None, description="来源标题")
     relevance_score: float = Field(
-        default=1.0, description="Relevance score (0.0-1.0)", ge=0.0, le=1.0
+        default=1.0, description="相关性评分（0.0-1.0）", ge=0.0, le=1.0
     )
 
     def __str__(self) -> str:
-        """Format insight as string with source attribution."""
+        """
+        格式化洞察结果为字符串，包含来源信息。
+
+        返回:
+            str: 格式化后的字符串。
+        """
         source = self.source_title or self.source_url
         return f"{self.content} [Source: {source}]"
 
 
 class ResearchContext(BaseModel):
-    """Research context for tracking research progress."""
+    """
+    用于跟踪研究进度的上下文信息。
 
-    query: str = Field(description="The original research query")
+    属性:
+        query (str): 原始研究查询。
+        insights (List[ResearchInsight]): 已发现的洞察结果列表。
+        follow_up_queries (List[str]): 生成的后续查询列表。
+        visited_urls (Set[str]): 已访问的URL集合。
+        current_depth (int): 当前研究深度。
+        max_depth (int): 最大研究深度。
+    """
+
+    query: str = Field(description="原始研究查询")
     insights: List[ResearchInsight] = Field(
-        default_factory=list, description="Key insights discovered"
+        default_factory=list, description="已发现的洞察结果列表"
     )
     follow_up_queries: List[str] = Field(
-        default_factory=list, description="Generated follow-up queries"
+        default_factory=list, description="生成的后续查询列表"
     )
     visited_urls: Set[str] = Field(
-        default_factory=set, description="URLs visited during research"
+        default_factory=set, description="已访问的URL集合"
     )
     current_depth: int = Field(
-        default=0, description="Current depth of research exploration", ge=0
+        default=0, description="当前研究深度", ge=0
     )
     max_depth: int = Field(
-        default=2, description="Maximum depth of research to reach", ge=1
+        default=2, description="最大研究深度", ge=1
     )
 
 
 class ResearchSummary(ToolResult):
-    """Comprehensive summary of deep research results."""
+    """
+    表示深度研究结果的综合摘要。
+
+    属性:
+        query (str): 原始研究查询。
+        insights (List[ResearchInsight]): 已发现的洞察结果列表。
+        visited_urls (Set[str]): 已访问的URL集合。
+        depth_reached (int): 达到的最大研究深度。
+    """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    query: str = Field(description="The original research query")
+    query: str = Field(description="原始研究查询")
     insights: List[ResearchInsight] = Field(
-        default_factory=list, description="Key insights discovered"
+        default_factory=list, description="已发现的洞察结果列表"
     )
     visited_urls: Set[str] = Field(
-        default_factory=set, description="URLs visited during research"
+        default_factory=set, description="已访问的URL集合"
     )
     depth_reached: int = Field(
-        default=0, description="Maximum depth of research reached", ge=0
+        default=0, description="达到的最大研究深度", ge=0
     )
 
     @model_validator(mode="after")
     def populate_output(self) -> "ResearchSummary":
-        """Populate the output field after validation."""
-        # Group and sort insights by relevance
+        """
+        在验证后填充输出字段，格式化摘要内容。
+
+        返回:
+            ResearchSummary: 填充后的摘要对象。
+        """
+        # 按相关性分组和排序洞察结果
         grouped_insights = {
             "Key Findings": [i for i in self.insights if i.relevance_score >= 0.8],
             "Additional Information": [
@@ -146,52 +183,60 @@ class ResearchSummary(ToolResult):
                         ]
                     )
 
-        # Assign the formatted string to the 'output' field inherited from ToolResult
+        # 将格式化后的字符串赋给继承自ToolResult的'output'字段
         self.output = "\n".join(sections)
         return self
 
 
 class DeepResearch(BaseTool):
-    """Advanced research tool that explores a topic through iterative web searches."""
+    """
+    高级研究工具，通过迭代的网络搜索和内容分析探索主题。
+
+    属性:
+        name (str): 工具名称。
+        description (str): 工具描述。
+        parameters (dict): 工具参数定义。
+        search_tool (WebSearch): 网络搜索工具依赖。
+        llm (LLM): 大语言模型依赖。
+    """
 
     name: str = "deep_research"
     description: str = """
-    Performs comprehensive research on a topic through multi-level web searches
-    and content analysis. Returns a structured summary of findings with source
-    attribution and relevance ratings.
+    通过多级网络搜索和内容分析对主题进行全面研究。
+    返回带有来源归属和相关性评分的结构化摘要。
     """
     parameters: dict = {
         "type": "object",
         "properties": {
             "query": {
                 "type": "string",
-                "description": "The research question or topic to investigate.",
+                "description": "要调查的研究问题或主题。",
             },
             "max_depth": {
                 "type": "integer",
-                "description": "Maximum depth of iterative research (1-5). Default is 2.",
+                "description": "迭代研究的最大深度（1-5）。默认值为2。",
                 "default": 2,
             },
             "results_per_search": {
                 "type": "integer",
-                "description": "Number of search results to analyze per search (1-20). Default is 5.",
+                "description": "每次搜索要分析的结果数量（1-20）。默认值为5。",
                 "default": 5,
             },
             "max_insights": {
                 "type": "integer",
-                "description": "Maximum number of insights to return. Default is 20.",
+                "description": "返回的最大洞察数量。默认值为20。",
                 "default": 20,
             },
             "time_limit_seconds": {
                 "type": "integer",
-                "description": "Maximum execution time in seconds. Default is 120.",
+                "description": "最大执行时间（秒）。默认值为120。",
                 "default": 120,
             },
         },
         "required": ["query"],
     }
 
-    # Dependency injection for easier testing
+    # 依赖注入，便于测试
     search_tool: WebSearch = Field(default_factory=WebSearch)
     llm: LLM = Field(default_factory=LLM)
 
@@ -203,17 +248,29 @@ class DeepResearch(BaseTool):
         max_insights: int = 20,
         time_limit_seconds: int = 120,
     ) -> ResearchSummary:
-        """Execute deep research on the given query."""
-        # Normalize parameters
+        """
+        执行对给定查询的深度研究。
+
+        参数:
+            query (str): 研究查询。
+            max_depth (int): 最大研究深度。
+            results_per_search (int): 每次搜索的结果数量。
+            max_insights (int): 最大洞察数量。
+            time_limit_seconds (int): 执行时间限制（秒）。
+
+        返回:
+            ResearchSummary: 研究结果的综合摘要。
+        """
+        # 规范化参数
         max_depth = max(1, min(max_depth, 5))
         results_per_search = max(1, min(results_per_search, 20))
 
-        # Initialize research context and set deadline
+        # 初始化研究上下文并设置截止时间
         context = ResearchContext(query=query, max_depth=max_depth)
         deadline = time.time() + time_limit_seconds
 
         try:
-            # Initiate research process with optimized query
+            # 使用优化后的查询启动研究过程
             optimized_query = await self._generate_optimized_query(query)
             await self._research_graph(
                 context=context,
@@ -224,7 +281,7 @@ class DeepResearch(BaseTool):
         except ToolError as e:
             logger.error(f"Research error: {str(e)}")
 
-        # Prepare final summary
+        # 准备最终摘要
         return ResearchSummary(
             query=query,
             insights=sorted(
@@ -235,7 +292,15 @@ class DeepResearch(BaseTool):
         )
 
     async def _generate_optimized_query(self, query: str) -> str:
-        """Generate an optimized search query using LLM."""
+        """
+        使用大语言模型生成优化的搜索查询。
+
+        参数:
+            query (str): 原始查询。
+
+        返回:
+            str: 优化后的查询。
+        """
         try:
             prompt = OPTIMIZE_QUERY_PROMPT.format(query=query)
             response = await self.llm.ask_tool(
@@ -245,13 +310,13 @@ class DeepResearch(BaseTool):
                         "type": "function",
                         "function": {
                             "name": "optimize_query",
-                            "description": "Generate an optimized search query",
+                            "description": "生成优化的搜索查询",
                             "parameters": {
                                 "type": "object",
                                 "properties": {
                                     "query": {
                                         "type": "string",
-                                        "description": "The optimized search query",
+                                        "description": "优化的搜索查询",
                                     }
                                 },
                                 "required": ["query"],
@@ -263,13 +328,13 @@ class DeepResearch(BaseTool):
                 stream=False,
             )
 
-            # Extract the query from the tool_call response
+            # 从工具调用响应中提取查询
             if response and response.tool_calls and len(response.tool_calls) > 0:
                 tool_call = response.tool_calls[0]
                 arguments = json.loads(tool_call.function.arguments)
                 optimized_query = arguments.get("query", "")
             else:
-                # Fallback to original query if tool call failed
+                # 如果工具调用失败，回退到原始查询
                 logger.warning("Tool call failed to return a valid response")
                 return query
 
@@ -281,7 +346,7 @@ class DeepResearch(BaseTool):
             return optimized_query
         except Exception as e:
             logger.warning(f"Failed to optimize query: {str(e)}")
-            return query  # Fall back to original query on error
+            return query  # 出错时回退到原始查询
 
     async def _research_graph(
         self,
@@ -290,57 +355,74 @@ class DeepResearch(BaseTool):
         results_count: int,
         deadline: float,
     ) -> None:
-        """Run a complete research cycle (search, analyze, generate follow-ups)."""
-        # Check termination conditions
+        """
+        运行完整的研究周期（搜索、分析、生成后续查询）。
+
+        参数:
+            context (ResearchContext): 研究上下文。
+            query (str): 当前查询。
+            results_count (int): 每次搜索的结果数量。
+            deadline (float): 截止时间戳。
+        """
+        # 检查终止条件
         if time.time() >= deadline or context.current_depth >= context.max_depth:
             return
 
-        # Log current research step
+        # 记录当前研究步骤
         logger.info(f"Research cycle at depth {context.current_depth + 1}")
 
-        # 1. Web search
+        # 1. 网络搜索
         search_results = await self._search_web(query, results_count)
         if not search_results:
             return
 
-        # 2. Extract insights
+        # 2. 提取洞察
         new_insights = await self._extract_insights(
             context, search_results, context.query, deadline
         )
         if not new_insights:
             return
 
-        # 3. Generate follow-up queries
+        # 3. 生成后续查询
         follow_up_queries = await self._generate_follow_ups(
             new_insights, query, context.query
         )
         context.follow_up_queries.extend(follow_up_queries)
 
-        # Update depth and proceed to next level
+        # 更新深度并进入下一级
         context.current_depth += 1
 
-        # 4. Continue research with follow-up queries
+        # 4. 使用后续查询继续研究
         if follow_up_queries and context.current_depth < context.max_depth:
-            tasks = []  # Create a list to hold the tasks
-            for follow_up in follow_up_queries[:2]:  # Limit branching factor
+            tasks = []  # 创建任务列表
+            for follow_up in follow_up_queries[:2]:  # 限制分支因子
                 if time.time() >= deadline:
                     break
 
-                # Create a coroutine for the recursive research call
+                # 为递归研究调用创建协程
                 task = self._research_graph(
                     context=context,
                     query=follow_up,
-                    results_count=max(1, results_count - 1),  # Reduce result count
+                    results_count=max(1, results_count - 1),  # 减少结果数量
                     deadline=deadline,
                 )
-                tasks.append(task)  # Add the task to the list
+                tasks.append(task)  # 将任务添加到列表
 
-            # Run all the created tasks concurrently
+            # 并发运行所有任务
             if tasks:
                 await asyncio.gather(*tasks)
 
     async def _search_web(self, query: str, results_count: int) -> List[SearchResult]:
-        """Perform web search for the given query."""
+        """
+        对给定查询执行网络搜索。
+
+        参数:
+            query (str): 搜索查询。
+            results_count (int): 返回的结果数量。
+
+        返回:
+            List[SearchResult]: 搜索结果列表。
+        """
         search_response = await self.search_tool.execute(
             query=query, num_results=results_count, fetch_content=True
         )
@@ -353,23 +435,34 @@ class DeepResearch(BaseTool):
         original_query: str,
         deadline: float,
     ) -> List[ResearchInsight]:
-        """Extract insights from search results."""
+        """
+        从搜索结果中提取洞察。
+
+        参数:
+            context (ResearchContext): 研究上下文。
+            results (List[SearchResult]): 搜索结果列表。
+            original_query (str): 原始查询。
+            deadline (float): 截止时间戳。
+
+        返回:
+            List[ResearchInsight]: 提取的洞察列表。
+        """
         all_insights = []
 
         for rst in results:
-            # Skip if URL already visited or time exceeded
+            # 跳过已访问的URL或超时的情况
             if rst.url in context.visited_urls or time.time() >= deadline:
                 continue
 
             context.visited_urls.add(rst.url)
 
-            # Skip if no content available
+            # 跳过无可用内容的情况
             if not rst.raw_content:
                 continue
 
-            # Extract insights using LLM
+            # 使用大语言模型提取洞察
             insights = await self._analyze_content(
-                content=rst.raw_content[:10000],  # Limit content size
+                content=rst.raw_content[:10000],  # 限制内容大小
                 url=rst.url,
                 title=rst.title,
                 query=original_query,
@@ -378,7 +471,7 @@ class DeepResearch(BaseTool):
             all_insights.extend(insights)
             context.insights.extend(insights)
 
-            # Log discovered insights
+            # 记录发现的洞察
             logger.info(f"Extracted {len(insights)} insights from {rst.url}")
 
         return all_insights
@@ -386,21 +479,31 @@ class DeepResearch(BaseTool):
     async def _generate_follow_ups(
         self, insights: List[ResearchInsight], current_query: str, original_query: str
     ) -> List[str]:
-        """Generate follow-up queries based on insights."""
+        """
+        基于洞察生成后续查询。
+
+        参数:
+            insights (List[ResearchInsight]): 洞察列表。
+            current_query (str): 当前查询。
+            original_query (str): 原始查询。
+
+        返回:
+            List[str]: 后续查询列表。
+        """
         if not insights:
             return []
 
-        # Format insights for the prompt
+        # 格式化洞察内容用于提示
         insights_text = "\n".join([f"- {insight.content}" for insight in insights[:5]])
 
-        # Create prompt for generating follow-up queries
+        # 创建生成后续查询的提示
         prompt = GENERATE_FOLLOW_UPS_PROMPT.format(
             original_query=original_query,
             current_query=current_query,
             insights=insights_text,
         )
 
-        # Get follow-up queries from LLM using structured output
+        # 使用大语言模型生成后续查询
         response = await self.llm.ask_tool(
             [{"role": "user", "content": prompt}],
             tools=[
@@ -408,14 +511,14 @@ class DeepResearch(BaseTool):
                     "type": "function",
                     "function": {
                         "name": "generate_follow_ups",
-                        "description": "Generate follow-up queries based on research insights",
+                        "description": "基于研究洞察生成后续查询",
                         "parameters": {
                             "type": "object",
                             "properties": {
                                 "follow_up_queries": {
                                     "type": "array",
                                     "items": {"type": "string"},
-                                    "description": "List of follow-up queries (max 3) that would help address gaps in current knowledge",
+                                    "description": "后续查询列表（最多3个）",
                                     "maxItems": 3,
                                 }
                             },
@@ -428,22 +531,33 @@ class DeepResearch(BaseTool):
             stream=False,
         )
 
-        # Extract queries from the tool response
+        # 从工具响应中提取查询
         queries = []
         if response and response.tool_calls and len(response.tool_calls) > 0:
             tool_call = response.tool_calls[0]
             arguments = json.loads(tool_call.function.arguments)
             queries = arguments.get("follow_up_queries", [])
 
-        # Ensure we don't return more than 3 queries
+        # 确保返回不超过3个查询
         return queries[:3]
 
     async def _analyze_content(
         self, content: str, url: str, title: str, query: str
     ) -> List[ResearchInsight]:
-        """Extract insights from content based on relevance to query."""
+        """
+        从内容中提取与查询相关的洞察。
+
+        参数:
+            content (str): 待分析的内容。
+            url (str): 内容来源的URL。
+            title (str): 内容标题。
+            query (str): 研究查询。
+
+        返回:
+            List[ResearchInsight]: 提取的洞察列表。
+        """
         prompt = EXTRACT_INSIGHTS_PROMPT.format(
-            query=query, content=content[:5000]  # Limit content size
+            query=query, content=content[:5000]  # 限制内容大小
         )
 
         response = await self.llm.ask_tool(
@@ -453,7 +567,7 @@ class DeepResearch(BaseTool):
                     "type": "function",
                     "function": {
                         "name": "extract_insights",
-                        "description": "Extract key insights from content with relevance scores",
+                        "description": "从内容中提取带有相关性评分的洞察",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -464,18 +578,18 @@ class DeepResearch(BaseTool):
                                         "properties": {
                                             "content": {
                                                 "type": "string",
-                                                "description": "The insight content",
+                                                "description": "洞察内容",
                                             },
                                             "relevance_score": {
                                                 "type": "number",
-                                                "description": "Relevance score between 0.0 and 1.0",
+                                                "description": "相关性评分（0.0-1.0）",
                                                 "minimum": 0.0,
                                                 "maximum": 1.0,
                                             },
                                         },
                                         "required": ["content", "relevance_score"],
                                     },
-                                    "description": "List of key insights extracted from the content",
+                                    "description": "从内容中提取的关键洞察列表",
                                     "maxItems": 3,
                                 }
                             },
@@ -490,7 +604,7 @@ class DeepResearch(BaseTool):
 
         insights = []
 
-        # Process structured JSON response
+        # 处理结构化的JSON响应
         if response and response.tool_calls and len(response.tool_calls) > 0:
             tool_call = response.tool_calls[0]
             arguments = json.loads(tool_call.function.arguments)
@@ -508,7 +622,7 @@ class DeepResearch(BaseTool):
                     )
                 )
 
-        # Fallback: if no structured insights found, use fallback approach
+        # 回退：如果未找到结构化洞察，使用回退方法
         if not insights:
             logger.warning(
                 f"Could not parse structured insights from LLM response for {url}. Using fallback."
@@ -528,6 +642,9 @@ class DeepResearch(BaseTool):
 
 
 if __name__ == "__main__":
+    """
+    主程序入口，用于测试DeepResearch工具的功能。
+    """
     deep_research = DeepResearch()
     result = asyncio.run(
         deep_research.execute(

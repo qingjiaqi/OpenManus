@@ -1,8 +1,8 @@
 # Global LLM configuration
 [llm]
-model = "claude-3-7-sonnet-20250219"       # The LLM model to use
-base_url = "https://api.anthropic.com/v1/" # API endpoint URL
-api_key = "YOUR_API_KEY"                   # Your API key
+model = "server:248021"       # The LLM model to use
+base_url = "http://v2.open.venus.oa.com/llmproxy" # API endpoint URL
+api_key = "SmnkCr0ISxuz5qn6Zo1BTRSO@3642"                   # Your API key
 max_tokens = 8192                          # Maximum number of tokens in the response
 temperature = 0.0                          # Controls randomness
 
@@ -33,9 +33,9 @@ temperature = 0.0                          # Controls randomness
 
 # Optional configuration for specific LLM models
 [llm.vision]
-model = "claude-3-7-sonnet-20250219"       # The vision model to use
-base_url = "https://api.anthropic.com/v1/" # API endpoint URL for vision model
-api_key = "YOUR_API_KEY"                   # Your API key for vision model
+model = "server:254603"       # The vision model to use
+base_url = "http://v2.open.venus.oa.com/llmproxy" # API endpoint URL for vision model
+api_key = "SmnkCr0ISxuz5qn6Zo1BTRSO@3642"                   # Your API key for vision model
 max_tokens = 8192                          # Maximum number of tokens in the response
 temperature = 0.0                          # Controls randomness for vision model
 
