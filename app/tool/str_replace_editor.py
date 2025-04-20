@@ -1,37 +1,34 @@
 """
-文件操作工具，支持沙箱环境。
-功能包括查看、创建、编辑文件，以及字符串替换和撤销编辑操作。
+文件和目录操作工具，支持沙箱环境。
 """
 
-# 导入必要的库和模块
-from collections import defaultdict  # 用于创建默认字典
-from pathlib import Path  # 用于处理文件路径
-from typing import Any, DefaultDict, List, Literal, Optional, get_args  # 类型注解支持
+from collections import defaultdict
+from pathlib import Path
+from typing import Any, DefaultDict, List, Literal, Optional, get_args
 
-# 导入项目自定义模块
-from app.config import config  # 配置文件
-from app.exceptions import ToolError  # 自定义异常类
-from app.tool import BaseTool  # 工具基类
-from app.tool.base import CLIResult, ToolResult  # 工具执行结果类
+from app.config import config
+from app.exceptions import ToolError
+from app.tool import BaseTool
+from app.tool.base import CLIResult, ToolResult
 from app.tool.file_operators import (
-    FileOperator,  # 文件操作接口
-    LocalFileOperator,  # 本地文件操作实现
-    PathLike,  # 路径类型别名
-    SandboxFileOperator,  # 沙箱文件操作实现
+    FileOperator,
+    LocalFileOperator,
+    PathLike,
+    SandboxFileOperator,
 )
 
 
-# 定义支持的命令类型
+# 定义支持的编辑命令
 Command = Literal[
-    "view",  # 查看文件或目录
+    "view",  # 查看文件或目录内容
     "create",  # 创建文件
-    "str_replace",  # 字符串替换
+    "str_replace",  # 替换字符串
     "insert",  # 插入内容
     "undo_edit",  # 撤销编辑
 ]
 
 # 常量定义
-SNIPPET_LINES: int = 4  # 显示代码片段的行数
+SNIPPET_LINES: int = 4  # 显示编辑片段时的上下文行数
 MAX_RESPONSE_LEN: int = 16000  # 最大响应长度
 TRUNCATED_MESSAGE: str = (
     "<response clipped><NOTE>To save on context only part of this file has been shown to you. "
@@ -40,32 +37,47 @@ TRUNCATED_MESSAGE: str = (
 )
 
 # 工具描述
-_STR_REPLACE_EDITOR_DESCRIPTION = """自定义编辑工具，用于查看、创建和编辑文件
+_STR_REPLACE_EDITOR_DESCRIPTION = """
+自定义编辑工具，用于查看、创建和编辑文件
 * 状态在命令调用和用户讨论之间持久化
-* 如果`path`是文件，`view`命令显示`cat -n`的结果；如果是目录，`view`列出非隐藏文件和目录（最多2层深度）
-* `create`命令不能用于已存在的文件路径
-* 如果命令生成过长输出，将被截断并标记为`<response clipped>`
-* `undo_edit`命令将撤销对文件`path`的最后一次编辑
+* 如果 `path` 是文件，`view` 显示 `cat -n` 的结果；如果是目录，`view` 列出非隐藏文件和目录（最多2层）
+* `create` 命令不能用于已存在的文件
+* 如果命令生成过长输出，会被截断并标记为 `<response clipped>`
+* `undo_edit` 命令会撤销对文件 `path` 的最后一次编辑
 
-使用`str_replace`命令的注意事项：
-* `old_str`参数必须完全匹配文件中的一行或多行连续内容，注意空格！
-* 如果`old_str`在文件中不唯一，替换操作不会执行。确保`old_str`包含足够的上下文以使其唯一
-* `new_str`参数包含替换`old_str`的新内容
+`str_replace` 命令的使用说明：
+* `old_str` 参数必须完全匹配文件中的一行或多行连续内容（注意空格！）
+* 如果 `old_str` 在文件中不唯一，替换不会执行。确保 `old_str` 包含足够的上下文以使其唯一
+* `new_str` 参数包含替换后的内容
 """
+
+
+def maybe_truncate(
+    content: str, truncate_after: Optional[int] = MAX_RESPONSE_LEN
+) -> str:
+    """
+    截断内容并在超过指定长度时附加提示信息。
+    :param content: 待截断的内容
+    :param truncate_after: 截断长度，默认为 MAX_RESPONSE_LEN
+    :return: 截断后的内容或原内容
+    """
+    if not truncate_after or len(content) <= truncate_after:
+        return content
+    return content[:truncate_after] + TRUNCATED_MESSAGE
 
 
 class StrReplaceEditor(BaseTool):
     """
-    字符串替换编辑器工具类，支持查看、创建、编辑文件，并提供沙箱环境支持。
+    文件编辑工具，支持查看、创建、编辑文件，并提供沙箱支持。
     """
 
-    name: str = "str_replace_editor"
-    description: str = _STR_REPLACE_EDITOR_DESCRIPTION
+    name: str = "str_replace_editor"  # 工具名称
+    description: str = _STR_REPLACE_EDITOR_DESCRIPTION  # 工具描述
     parameters: dict = {
         "type": "object",
         "properties": {
             "command": {
-                "description": "要运行的命令。可选值为：`view`, `create`, `str_replace`, `insert`, `undo_edit`。",
+                "description": "要运行的命令。可选值：`view`, `create`, `str_replace`, `insert`, `undo_edit`。",
                 "enum": ["view", "create", "str_replace", "insert", "undo_edit"],
                 "type": "string",
             },
@@ -74,40 +86,38 @@ class StrReplaceEditor(BaseTool):
                 "type": "string",
             },
             "file_text": {
-                "description": "`create`命令的必需参数，指定要创建的文件内容。",
+                "description": "`create` 命令的必需参数，表示要创建的文件内容。",
                 "type": "string",
             },
             "old_str": {
-                "description": "`str_replace`命令的必需参数，指定要替换的字符串。",
+                "description": "`str_replace` 命令的必需参数，表示要替换的字符串。",
                 "type": "string",
             },
             "new_str": {
-                "description": "`str_replace`或`insert`命令的可选参数，指定替换或插入的新字符串。",
+                "description": "`str_replace` 或 `insert` 命令的参数，表示替换或插入的新字符串。",
                 "type": "string",
             },
             "insert_line": {
-                "description": "`insert`命令的必需参数，指定插入新字符串的行号（从1开始）。",
+                "description": "`insert` 命令的必需参数，表示插入的行号（从1开始）。",
                 "type": "integer",
             },
             "view_range": {
-                "description": "`view`命令的可选参数，指定查看文件的行号范围（例如[11, 12]显示第11和12行）。",
+                "description": "`view` 命令的可选参数，表示查看的行范围（如 [11, 12] 显示第11和12行）。",
                 "items": {"type": "integer"},
                 "type": "array",
             },
         },
         "required": ["command", "path"],
     }
-    _file_history: DefaultDict[PathLike, List[str]] = defaultdict(list)
-    _local_operator: LocalFileOperator = LocalFileOperator()
-    _sandbox_operator: SandboxFileOperator = SandboxFileOperator()
+    _file_history: DefaultDict[PathLike, List[str]] = defaultdict(list)  # 文件编辑历史记录
+    _local_operator: LocalFileOperator = LocalFileOperator()  # 本地文件操作器
+    _sandbox_operator: SandboxFileOperator = SandboxFileOperator()  # 沙箱文件操作器
 
     # def _get_operator(self, use_sandbox: bool) -> FileOperator:
     def _get_operator(self) -> FileOperator:
         """
-        根据执行模式获取适当的文件操作器。
-
-        返回:
-            FileOperator: 本地文件操作器或沙箱文件操作器，取决于配置是否启用沙箱模式。
+        根据配置返回文件操作器（本地或沙箱）。
+        :return: 文件操作器实例
         """
         return (
             self._sandbox_operator
@@ -129,55 +139,46 @@ class StrReplaceEditor(BaseTool):
     ) -> str:
         """
         执行文件操作命令。
-
-        参数:
-            command (Command): 要执行的命令（view、create、str_replace、insert、undo_edit）。
-            path (str): 文件或目录的绝对路径。
-            file_text (str | None): `create` 命令的文件内容。
-            view_range (list[int] | None): `view` 命令的行号范围。
-            old_str (str | None): `str_replace` 命令的旧字符串。
-            new_str (str | None): `str_replace` 或 `insert` 命令的新字符串。
-            insert_line (int | None): `insert` 命令的插入行号。
-            **kwargs: 其他可选参数。
-
-        返回:
-            str: 命令执行结果的字符串表示。
+        :param command: 命令类型
+        :param path: 文件或目录路径
+        :param file_text: 文件内容（用于 `create` 命令）
+        :param view_range: 查看的行范围（用于 `view` 命令）
+        :param old_str: 要替换的字符串（用于 `str_replace` 命令）
+        :param new_str: 新字符串（用于 `str_replace` 或 `insert` 命令）
+        :param insert_line: 插入的行号（用于 `insert` 命令）
+        :param kwargs: 其他参数
+        :return: 操作结果
         """
-        # 获取适当的文件操作器
+        # 获取文件操作器
         operator = self._get_operator()
 
-        # 验证路径和命令组合
+        # 验证路径和命令的合法性
         await self.validate_path(command, Path(path), operator)
 
-        # 执行相应的命令
+        # 执行命令
         if command == "view":
             result = await self.view(path, view_range, operator)
         elif command == "create":
             if file_text is None:
-                raise ToolError("Parameter `file_text` is required for command: create")
+                raise ToolError("`create` 命令需要 `file_text` 参数")
             await operator.write_file(path, file_text)
             self._file_history[path].append(file_text)
-            result = ToolResult(output=f"File created successfully at: {path}")
+            result = ToolResult(output=f"文件创建成功：{path}")
         elif command == "str_replace":
             if old_str is None:
-                raise ToolError(
-                    "Parameter `old_str` is required for command: str_replace"
-                )
+                raise ToolError("`str_replace` 命令需要 `old_str` 参数")
             result = await self.str_replace(path, old_str, new_str, operator)
         elif command == "insert":
             if insert_line is None:
-                raise ToolError(
-                    "Parameter `insert_line` is required for command: insert"
-                )
+                raise ToolError("`insert` 命令需要 `insert_line` 参数")
             if new_str is None:
-                raise ToolError("Parameter `new_str` is required for command: insert")
+                raise ToolError("`insert` 命令需要 `new_str` 参数")
             result = await self.insert(path, insert_line, new_str, operator)
         elif command == "undo_edit":
             result = await self.undo_edit(path, operator)
         else:
-            # 此情况应由类型检查捕获，但为了安全起见包含
             raise ToolError(
-                f'Unrecognized command {command}. The allowed commands for the {self.name} tool are: {", ".join(get_args(Command))}'
+                f'无效命令 {command}。支持的命令：{get_args(Command)}'
             )
 
         return str(result)
@@ -186,41 +187,31 @@ class StrReplaceEditor(BaseTool):
         self, command: str, path: Path, operator: FileOperator
     ) -> None:
         """
-        验证路径和命令组合是否有效。
-
-        参数:
-            command (str): 要执行的命令。
-            path (Path): 文件或目录的路径。
-            operator (FileOperator): 文件操作器。
-
-        抛出:
-            ToolError: 如果路径或命令组合无效。
+        验证路径和命令的合法性。
+        :param command: 命令类型
+        :param path: 文件或目录路径
+        :param operator: 文件操作器
+        :raises ToolError: 如果路径或命令不合法
         """
         # 检查路径是否为绝对路径
         if not path.is_absolute():
-            raise ToolError(f"The path {path} is not an absolute path")
+            raise ToolError(f"路径 {path} 不是绝对路径")
 
-        # 仅对非 create 命令检查路径是否存在
+        # 非 `create` 命令需检查路径是否存在
         if command != "create":
             if not await operator.exists(path):
-                raise ToolError(
-                    f"The path {path} does not exist. Please provide a valid path."
-                )
+                raise ToolError(f"路径 {path} 不存在")
 
             # 检查路径是否为目录
             is_dir = await operator.is_directory(path)
             if is_dir and command != "view":
-                raise ToolError(
-                    f"The path {path} is a directory and only the `view` command can be used on directories"
-                )
+                raise ToolError(f"路径 {path} 是目录，仅支持 `view` 命令")
 
-        # 检查 create 命令的文件是否已存在
+        # `create` 命令需确保文件不存在
         elif command == "create":
             exists = await operator.exists(path)
             if exists:
-                raise ToolError(
-                    f"File already exists at: {path}. Cannot overwrite files using command `create`."
-                )
+                raise ToolError(f"文件已存在：{path}，无法覆盖")
 
     async def view(
         self,
@@ -230,51 +221,36 @@ class StrReplaceEditor(BaseTool):
     ) -> CLIResult:
         """
         查看文件或目录内容。
-
-        参数:
-            path (PathLike): 文件或目录的路径。
-            view_range (Optional[List[int]]): 查看文件的行号范围。
-            operator (FileOperator): 文件操作器。
-
-        返回:
-            CLIResult: 包含查看结果的命令行结果对象。
+        :param path: 文件或目录路径
+        :param view_range: 查看的行范围
+        :param operator: 文件操作器
+        :return: 查看结果
         """
-        # 确定路径是否为目录
+        # 检查是否为目录
         is_dir = await operator.is_directory(path)
 
         if is_dir:
-            # 目录处理
+            # 目录不支持行范围参数
             if view_range:
-                raise ToolError(
-                    "The `view_range` parameter is not allowed when `path` points to a directory."
-                )
-
+                raise ToolError("`view_range` 参数不能用于目录")
             return await self._view_directory(path, operator)
         else:
-            # 文件处理
             return await self._view_file(path, operator, view_range)
 
     @staticmethod
     async def _view_directory(path: PathLike, operator: FileOperator) -> CLIResult:
         """
         查看目录内容。
-
-        参数:
-            path (PathLike): 目录路径。
-            operator (FileOperator): 文件操作器。
-
-        返回:
-            CLIResult: 包含目录内容的命令行结果对象。
+        :param path: 目录路径
+        :param operator: 文件操作器
+        :return: 目录内容
         """
         find_cmd = f"find {path} -maxdepth 2 -not -path '*/\.*'"
-
-        # 使用操作器执行命令
         returncode, stdout, stderr = await operator.run_command(find_cmd)
 
         if not stderr:
             stdout = (
-                f"Here's the files and directories up to 2 levels deep in {path}, "
-                f"excluding hidden items:\n{stdout}\n"
+                f"目录 {path} 的内容（最多2层，排除隐藏项）：\n{stdout}\n"
             )
 
         return CLIResult(output=stdout, error=stderr)
@@ -286,55 +262,45 @@ class StrReplaceEditor(BaseTool):
         view_range: Optional[List[int]] = None,
     ) -> CLIResult:
         """
-        查看文件内容，可选行号范围。
-
-        参数:
-            path (PathLike): 文件路径。
-            operator (FileOperator): 文件操作器。
-            view_range (Optional[List[int]]): 查看的行号范围。
-
-        返回:
-            CLIResult: 包含文件内容的命令行结果对象。
+        查看文件内容，支持行范围。
+        :param path: 文件路径
+        :param operator: 文件操作器
+        :param view_range: 查看的行范围
+        :return: 文件内容
         """
-        # 读取文件内容
         file_content = await operator.read_file(path)
         init_line = 1
 
-        # 如果指定了行号范围，则应用范围
+        # 处理行范围
         if view_range:
             if len(view_range) != 2 or not all(isinstance(i, int) for i in view_range):
-                raise ToolError(
-                    "Invalid `view_range`. It should be a list of two integers."
-                )
+                raise ToolError("`view_range` 应为两个整数的列表")
 
             file_lines = file_content.split("\n")
             n_lines_file = len(file_lines)
             init_line, final_line = view_range
 
-            # 验证行号范围
+            # 验证行范围
             if init_line < 1 or init_line > n_lines_file:
                 raise ToolError(
-                    f"Invalid `view_range`: {view_range}. Its first element `{init_line}` should be "
-                    f"within the range of lines of the file: {[1, n_lines_file]}"
+                    f"`view_range` 起始行 {init_line} 超出文件范围 [1, {n_lines_file}]"
                 )
             if final_line > n_lines_file:
                 raise ToolError(
-                    f"Invalid `view_range`: {view_range}. Its second element `{final_line}` should be "
-                    f"smaller than the number of lines in the file: `{n_lines_file}`"
+                    f"`view_range` 结束行 {final_line} 超出文件范围 [1, {n_lines_file}]"
                 )
             if final_line != -1 and final_line < init_line:
                 raise ToolError(
-                    f"Invalid `view_range`: {view_range}. Its second element `{final_line}` should be "
-                    f"larger or equal than its first `{init_line}`"
+                    f"`view_range` 结束行 {final_line} 必须大于等于起始行 {init_line}"
                 )
 
-            # 应用范围
+            # 应用行范围
             if final_line == -1:
                 file_content = "\n".join(file_lines[init_line - 1 :])
             else:
                 file_content = "\n".join(file_lines[init_line - 1 : final_line])
 
-        # 格式化并返回结果
+        # 格式化输出
         return CLIResult(
             output=self._make_output(file_content, str(path), init_line=init_line)
         )
@@ -350,27 +316,27 @@ class StrReplaceEditor(BaseTool):
         替换文件中的唯一字符串。
 
         参数:
-            path (PathLike): 文件路径。
-            old_str (str): 要替换的旧字符串。
-            new_str (Optional[str]): 替换的新字符串。
-            operator (FileOperator): 文件操作器。
+            path: 文件路径。
+            old_str: 待替换的字符串。
+            new_str: 替换后的字符串，可选。
+            operator: 文件操作器，可选。
 
-        返回:
-            CLIResult: 包含替换结果的命令行结果对象。
+        返回值:
+            CLIResult: 操作结果。
         """
         # 读取文件内容并扩展制表符
         file_content = (await operator.read_file(path)).expandtabs()
         old_str = old_str.expandtabs()
         new_str = new_str.expandtabs() if new_str is not None else ""
 
-        # 检查旧字符串在文件中是否唯一
+        # 检查 old_str 是否在文件中唯一
         occurrences = file_content.count(old_str)
         if occurrences == 0:
             raise ToolError(
-                f"No replacement was performed, old_str `{old_str}` did not appear verbatim in {path}."
+                f"未执行替换，`old_str` `{old_str}` 在 {path} 中未出现。"
             )
         elif occurrences > 1:
-            # 查找旧字符串出现的行号
+            # 找到所有出现 old_str 的行号
             file_content_lines = file_content.split("\n")
             lines = [
                 idx + 1
@@ -378,11 +344,10 @@ class StrReplaceEditor(BaseTool):
                 if old_str in line
             ]
             raise ToolError(
-                f"No replacement was performed. Multiple occurrences of old_str `{old_str}` "
-                f"in lines {lines}. Please ensure it is unique"
+                f"未执行替换。`old_str` `{old_str}` 在行 {lines} 中出现多次。请确保它是唯一的"
             )
 
-        # 替换旧字符串为新字符串
+        # 替换 old_str 为 new_str
         new_file_content = file_content.replace(old_str, new_str)
 
         # 将新内容写入文件
@@ -391,18 +356,18 @@ class StrReplaceEditor(BaseTool):
         # 将原始内容保存到历史记录
         self._file_history[path].append(file_content)
 
-        # 创建编辑部分的代码片段
+        # 生成编辑部分的代码片段
         replacement_line = file_content.split(old_str)[0].count("\n")
         start_line = max(0, replacement_line - SNIPPET_LINES)
         end_line = replacement_line + SNIPPET_LINES + new_str.count("\n")
         snippet = "\n".join(new_file_content.split("\n")[start_line : end_line + 1])
 
         # 准备成功消息
-        success_msg = f"The file {path} has been edited. "
+        success_msg = f"文件 {path} 已编辑。 "
         success_msg += self._make_output(
-            snippet, f"a snippet of {path}", start_line + 1
+            snippet, f"文件 {path} 的片段", start_line + 1
         )
-        success_msg += "Review the changes and make sure they are as expected. Edit the file again if necessary."
+        success_msg += "请检查更改，确保它们符合预期。如有必要，请再次编辑文件。"
 
         return CLIResult(output=success_msg)
 
@@ -414,28 +379,27 @@ class StrReplaceEditor(BaseTool):
         operator: FileOperator = None,
     ) -> CLIResult:
         """
-        在文件的指定行插入新内容。
+        在文件的指定行插入文本。
 
         参数:
-            path (PathLike): 文件路径。
-            insert_line (int): 插入新内容的行号（从1开始）。
-            new_str (str): 要插入的新字符串。
-            operator (FileOperator): 文件操作器。
+            path: 文件路径。
+            insert_line: 插入的行号。
+            new_str: 插入的文本内容。
+            operator: 文件操作器，可选。
 
-        返回:
-            CLIResult: 包含插入结果的命令行结果对象。
+        返回值:
+            CLIResult: 操作结果。
         """
-        # 读取并准备内容
+        # 读取并准备文件内容
         file_text = (await operator.read_file(path)).expandtabs()
         new_str = new_str.expandtabs()
         file_text_lines = file_text.split("\n")
         n_lines_file = len(file_text_lines)
 
-        # 验证插入行号
+        # 验证 insert_line 是否有效
         if insert_line < 0 or insert_line > n_lines_file:
             raise ToolError(
-                f"Invalid `insert_line` parameter: {insert_line}. It should be within "
-                f"the range of lines of the file: {[0, n_lines_file]}"
+                f"无效的 `insert_line` 参数：{insert_line}。它应该在文件的行范围内：[0, n_lines_file]"
             )
 
         # 执行插入操作
@@ -446,7 +410,7 @@ class StrReplaceEditor(BaseTool):
             + file_text_lines[insert_line:]
         )
 
-        # 创建预览片段
+        # 生成预览片段
         snippet_lines = (
             file_text_lines[max(0, insert_line - SNIPPET_LINES) : insert_line]
             + new_str_lines
@@ -461,13 +425,13 @@ class StrReplaceEditor(BaseTool):
         self._file_history[path].append(file_text)
 
         # 准备成功消息
-        success_msg = f"The file {path} has been edited. "
+        success_msg = f"文件 {path} 已编辑。 "
         success_msg += self._make_output(
             snippet,
-            "a snippet of the edited file",
+            "编辑文件的片段",
             max(1, insert_line - SNIPPET_LINES + 1),
         )
-        success_msg += "Review the changes and make sure they are as expected (correct indentation, no duplicate lines, etc). Edit the file again if necessary."
+        success_msg += "请检查更改，确保它们符合预期（正确的缩进，没有重复行等）。如有必要，请再次编辑文件。"
 
         return CLIResult(output=success_msg)
 
@@ -478,20 +442,20 @@ class StrReplaceEditor(BaseTool):
         撤销对文件的最后一次编辑。
 
         参数:
-            path (PathLike): 文件路径。
-            operator (FileOperator): 文件操作器。
+            path: 文件路径。
+            operator: 文件操作器，可选。
 
-        返回:
-            CLIResult: 包含撤销结果的命令行结果对象。
+        返回值:
+            CLIResult: 操作结果。
         """
         if not self._file_history[path]:
-            raise ToolError(f"No edit history found for {path}.")
+            raise ToolError(f"未找到 {path} 的编辑历史。")
 
         old_text = self._file_history[path].pop()
         await operator.write_file(path, old_text)
 
         return CLIResult(
-            output=f"Last edit to {path} undone successfully. {self._make_output(old_text, str(path))}"
+            output=f"成功撤销 {path} 的最后一次编辑。{self._make_output(old_text, str(path))}"
         )
 
     def _make_output(
@@ -502,22 +466,22 @@ class StrReplaceEditor(BaseTool):
         expand_tabs: bool = True,
     ) -> str:
         """
-        格式化文件内容以便显示，并添加行号。
+        格式化文件内容用于显示，带行号。
 
         参数:
-            file_content (str): 文件内容。
-            file_descriptor (str): 文件描述符。
-            init_line (int): 起始行号（默认为1）。
-            expand_tabs (bool): 是否扩展制表符（默认为True）。
+            file_content: 文件内容。
+            file_descriptor: 文件描述。
+            init_line: 起始行号，默认为1。
+            expand_tabs: 是否扩展制表符，默认为True。
 
-        返回:
-            str: 格式化后的文件内容字符串。
+        返回值:
+            str: 格式化后的字符串。
         """
         file_content = maybe_truncate(file_content)
         if expand_tabs:
             file_content = file_content.expandtabs()
 
-        # 为每行添加行号
+        # 为每一行添加行号
         file_content = "\n".join(
             [
                 f"{i + init_line:6}\t{line}"
@@ -526,7 +490,7 @@ class StrReplaceEditor(BaseTool):
         )
 
         return (
-            f"Here's the result of running `cat -n` on {file_descriptor}:\n"
+            f"这是运行 `cat -n` 在 {file_descriptor} 上的结果：\n"
             + file_content
             + "\n"
         )
