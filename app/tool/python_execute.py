@@ -59,6 +59,7 @@ class PythonExecute(BaseTool):
             Dict: 包含执行结果或错误信息的字典，以及执行状态。
         """
 
+        # 创建多进程管理器，用于进程间共享数据（如列表、字典等）
         with multiprocessing.Manager() as manager:
             result = manager.dict({"observation": "", "success": False})  # 创建共享字典
             if isinstance(__builtins__, dict):
@@ -80,3 +81,18 @@ class PythonExecute(BaseTool):
                     "success": False,  # 标记执行失败
                 }
             return dict(result)  # 返回执行结果
+
+
+# 测试代码块
+if __name__ == "__main__":
+    import asyncio
+
+    async def my_execute():
+        tool = PythonExecute()
+        result = await tool.execute(
+            code="print('Hello, World!')\nprint(1+2)",
+            timeout=5
+        )
+        print("测试结果:", result)
+
+    asyncio.run(my_execute())

@@ -11,10 +11,9 @@ from app.tool.mcp import MCPClients  # 导入MCP客户端工具
 
 
 class MCPAgent(ToolCallAgent):
-    """Agent for interacting with MCP (Model Context Protocol) servers.
+    """用于与MCP（模型上下文协议）服务器交互的代理。
 
-    This agent connects to an MCP server using either SSE or stdio transport
-    and makes the server's tools available through the agent's tool interface.
+    该代理通过SSE或stdio传输连接到MCP服务器，并将服务器的工具通过代理的工具接口提供。
     """
 
     name: str = "mcp_agent"  # Agent名称

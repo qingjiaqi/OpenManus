@@ -39,7 +39,7 @@ class BaseAgent(BaseModel, ABC):
     max_steps: int = Field(default=10, description="终止前的最大步骤数")
     current_step: int = Field(default=0, description="当前执行步骤")
 
-    duplicate_threshold: int = 2  # 检测重复内容的阈值
+    duplicate_threshold: int = 2  # 检测重复内容出现的次数阈值
 
     class Config:
         arbitrary_types_allowed = True  # 允许任意类型
@@ -139,7 +139,7 @@ class BaseAgent(BaseModel, ABC):
                 logger.info(f"执行步骤 {self.current_step}/{self.max_steps}")
                 step_result = await self.step()  # 执行单步操作
 
-                # 检查是否卡住
+                # 检查是否在同一个步骤卡住
                 if self.is_stuck():
                     self.handle_stuck_state()
 
@@ -175,7 +175,7 @@ class BaseAgent(BaseModel, ABC):
         if not last_message.content:
             return False
 
-        # 统计相同内容的出现次数
+        # 统计相同内容的出现次数，如果是assistant返回并且内容和最后一次相同就加1
         duplicate_count = sum(
             1
             for msg in reversed(self.memory.messages[:-1])

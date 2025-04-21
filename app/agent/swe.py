@@ -10,7 +10,7 @@ from app.tool import Bash, StrReplaceEditor, Terminate, ToolCollection
 # SWEAgent 是一个自主 AI 程序员，用于直接与计算机交互以完成任务。
 # 继承自 ToolCallAgent，支持工具调用和自然语言对话。
 class SWEAgent(ToolCallAgent):
-    """An agent that implements the SWEAgent paradigm for executing code and natural conversations."""
+    """一个实现了SWEAgent范式的代理，用于执行代码和自然语言对话。"""
 
     # 代理名称，用于标识代理类型
     name: str = "swe"
